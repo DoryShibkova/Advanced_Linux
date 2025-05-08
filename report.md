@@ -1,6 +1,8 @@
 # Kernel Modules Report
 **Daria Shibkova, CBS-01**
 
+GitHub link: https://github.com/DoryShibkova/Advanced_Linux
+
 ## **Overview**
 This report documents the implementation and analysis of a character device kernel module that implements an integer stack data structure. The work demonstrates understanding of Linux kernel module development, synchronization mechanisms, and userspace-kernel communication.
 
@@ -29,6 +31,7 @@ This report documents the implementation and analysis of a character device kern
 #define DEVICE_NAME "int_stack"
 #define IOCTL_SET_SIZE _IOW('s', 1, int)
 
+MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Daria Shibkova");
 
 // Stack data structure with mutex protection

@@ -10,6 +10,7 @@
 #define DEVICE_NAME "int_stack"
 #define IOCTL_SET_SIZE _IOW('s', 1, int)
 
+MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Daria Shibkova");
 
 // Stack data structure with mutex protection
