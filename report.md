@@ -1,12 +1,12 @@
 # Kernel Modules Report
 **Daria Shibkova, CBS-01**
 
-GitHub link: https://github.com/DoryShibkova/Advanced_Linux
+GitHub link: https://github.com/DoryShibkova/Advanced_Linux/tree/lab5
 
 ## **Overview**
-This report documents the implementation and analysis of a character device kernel module that implements an integer stack data structure. The work demonstrates understanding of Linux kernel module development, synchronization mechanisms, and userspace-kernel communication.
+This report documents the implementation and analysis of a character device kernel module that implements an integer stack data structure, now protected by a USB electronic key. The work demonstrates understanding of Linux kernel module development, USB device handling, synchronization mechanisms, and userspace-kernel communication.
 
-## **Features**
+## **Features & Implementation**
 
 ### **Core Functionality**
 - Dynamic memory allocation for stack data structure
@@ -14,9 +14,12 @@ This report documents the implementation and analysis of a character device kern
 - Character device interface for userspace access
 - Stack size configuration via ioctl
 - Push/pop operations with proper error handling
+- **USB device as electronic key** chardev only appears when the key is present
+- **Automatic chardev removal** chardev is removed from /dev when the key is removed, but stack is preserved
+- **User-friendly error** userspace utility prints `error: USB key not inserted` if the key is not present
 
 ### **Implementation Components**
-- Kernel module (int_stack.ko)
+- Kernel module (`int_stack.ko`) **with added USB device**:
 
 ```
 #include <linux/module.h>
@@ -27,12 +30,18 @@ This report documents the implementation and analysis of a character device kern
 #include <linux/ioctl.h>
 #include <linux/device.h>
 #include <linux/cdev.h>
+#include <linux/usb.h>  // Include USB support
 
 #define DEVICE_NAME "int_stack"
 #define IOCTL_SET_SIZE _IOW('s', 1, int)
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Daria Shibkova");
+MODULE_DESCRIPTION("Integer stack kernel module with USB key support");
+
+// USB device ID for the electronic key
+#define USB_KEY_VENDOR_ID 0x0e0f
+#define USB_KEY_PRODUCT_ID 0x0003
 
 // Stack data structure with mutex protection
 struct stack {
@@ -46,6 +55,78 @@ static struct stack *stack;
 static int major_number;
 static struct class *stack_class;
 static struct device *stack_device;
+
+// USB device table
+static const struct usb_device_id usb_key_table[] = {
+    { USB_DEVICE(USB_KEY_VENDOR_ID, USB_KEY_PRODUCT_ID) },
+    {}
+};
+MODULE_DEVICE_TABLE(usb, usb_key_table);
+
+// Function prototypes
+static int stack_open(struct inode *inode, struct file *file);
+static int stack_release(struct inode *inode, struct file *file);
+static ssize_t stack_read(struct file *file, char __user *buf, size_t count, loff_t *ppos);
+static ssize_t stack_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
+static long stack_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+
+// File operations structure
+static const struct file_operations stack_fops = {
+    .owner = THIS_MODULE,
+    .open = stack_open,
+    .release = stack_release,
+    .read = stack_read,
+    .write = stack_write,
+    .unlocked_ioctl = stack_ioctl,
+};
+
+// USB probe function
+static int usb_key_probe(struct usb_interface *interface, const struct usb_device_id *id) {
+    printk(KERN_INFO "USB key inserted\n");
+    
+    // Register character device
+    major_number = register_chrdev(0, DEVICE_NAME, &stack_fops);
+    if (major_number < 0) {
+        printk(KERN_ERR "Failed to register character device\n");
+        return major_number;
+    }
+    
+    stack_class = class_create(DEVICE_NAME);
+    if (IS_ERR(stack_class)) {
+        unregister_chrdev(major_number, DEVICE_NAME);
+        return PTR_ERR(stack_class);
+    }
+    
+    stack_device = device_create(stack_class, NULL, MKDEV(major_number, 0), NULL, DEVICE_NAME);
+    if (IS_ERR(stack_device)) {
+        class_destroy(stack_class);
+        unregister_chrdev(major_number, DEVICE_NAME);
+        return PTR_ERR(stack_device);
+    }
+    
+    printk(KERN_INFO "Character device created\n");
+    return 0;
+}
+
+// USB disconnect function
+static void usb_key_disconnect(struct usb_interface *interface) {
+    printk(KERN_INFO "USB key removed\n");
+    
+    // Remove character device
+    device_destroy(stack_class, MKDEV(major_number, 0));
+    class_destroy(stack_class);
+    unregister_chrdev(major_number, DEVICE_NAME);
+    
+    printk(KERN_INFO "Character device removed\n");
+}
+
+// USB driver structure
+static struct usb_driver usb_key_driver = {
+    .name = "usb_key_driver",
+    .id_table = usb_key_table,
+    .probe = usb_key_probe,
+    .disconnect = usb_key_disconnect,
+};
 
 // Initialize device on open
 static int stack_open(struct inode *inode, struct file *file) {
@@ -143,18 +224,10 @@ static long stack_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
     return 0;
 }
 
-// File operations structure
-static const struct file_operations stack_fops = {
-    .owner = THIS_MODULE,
-    .open = stack_open,
-    .release = stack_release,
-    .read = stack_read,
-    .write = stack_write,
-    .unlocked_ioctl = stack_ioctl,
-};
-
 // Module initialization
 static int __init stack_init(void) {
+    int result;
+    
     stack = kmalloc(sizeof(struct stack), GFP_KERNEL);
     if (!stack)
         return -ENOMEM;
@@ -164,36 +237,21 @@ static int __init stack_init(void) {
     stack->size = 0;
     stack->top = 0;
     
-    major_number = register_chrdev(0, DEVICE_NAME, &stack_fops);
-    if (major_number < 0) {
+    // Register USB driver
+    result = usb_register(&usb_key_driver);
+    if (result) {
         kfree(stack);
-        return major_number;
+        printk(KERN_ERR "Failed to register USB driver\n");
+        return result;
     }
     
-    stack_class = class_create(DEVICE_NAME);
-    if (IS_ERR(stack_class)) {
-        unregister_chrdev(major_number, DEVICE_NAME);
-        kfree(stack);
-        return PTR_ERR(stack_class);
-    }
-    
-    stack_device = device_create(stack_class, NULL, MKDEV(major_number, 0), NULL, DEVICE_NAME);
-    if (IS_ERR(stack_device)) {
-        class_destroy(stack_class);
-        unregister_chrdev(major_number, DEVICE_NAME);
-        kfree(stack);
-        return PTR_ERR(stack_device);
-    }
-    
-    printk(KERN_INFO "Stack module loaded\n");
+    printk(KERN_INFO "Stack module with USB key support loaded\n");
     return 0;
 }
 
 // Module cleanup
 static void __exit stack_exit(void) {
-    device_destroy(stack_class, MKDEV(major_number, 0));
-    class_destroy(stack_class);
-    unregister_chrdev(major_number, DEVICE_NAME);
+    usb_deregister(&usb_key_driver);
     
     if (stack) {
         if (stack->data)
@@ -201,13 +259,13 @@ static void __exit stack_exit(void) {
         kfree(stack);
     }
     
-    printk(KERN_INFO "Stack module unloaded\n");
+    printk(KERN_INFO "Stack module with USB key support unloaded\n");
 }
 
 module_init(stack_init);
 module_exit(stack_exit);
 ```
-- Userspace utility (kernel_stack)
+- Userspace utility (kernel_stack) **with added `error: USB key not inserted`**:
 
 ```
 #include <stdio.h>
@@ -235,6 +293,12 @@ int main(int argc, char *argv[]) {
     int fd;
     int value;
     int ret;
+
+    // Check if the device file exists
+    if (access(DEVICE_PATH, F_OK) == -1) {
+        fprintf(stderr, "error: USB key not inserted\n");
+        return 1;
+    }
 
     if (argc < 2) {
         print_usage();
@@ -343,6 +407,25 @@ int main(int argc, char *argv[]) {
 - Character device interface
 - Synchronization mechanisms
 
+
+### **How Each Requirement Was Addressed**
+
+1. **USB Device as Electronic Key**
+   - The kernel module registers a USB driver for a specific VID/PID (mouse, keyboard, USB stick, etc.).
+   - The chardev is only created in the `usb_key_probe` function when the USB key is inserted.
+
+2. **Chardev Appears Only When Key Is Inserted**
+   - `/dev/int_stack` is created only when the USB key is present.
+   - If the key is not present, the device does not exist in `/dev`.
+
+3. **Chardev Removal on Key Removal, Stack Preserved**
+   - In the `usb_key_disconnect` function, the chardev is removed from `/dev`.
+   - The stack data structure is not destroyed; it remains in memory until the module is unloaded.
+
+4. **Userspace Wrapper Error Message**
+   - The userspace utility checks for the existence of `/dev/int_stack` before opening it.
+   - If the device does not exist, it prints `error: USB key not inserted` and exits.
+
 ### **Dependencies**
 The implementation requires:
 - Linux kernel headers
@@ -361,55 +444,16 @@ clean:
 	rm -f kernel_stack
 ```
 
-## **Kernel Module Implementation**
+### **Usage Examples and testing**
 
-1. **Stack Data Structure**
-   - Implemented using dynamic memory allocation
-   - Protected with mutex for thread safety
-   - Supports configurable size via ioctl
+Add USB device detection:
 
-```c
-struct stack {
-    int *data;
-    int top;
-    int size;
-    struct mutex lock;
-};
-```
+![alt text](test_0.jpg)
 
-2. **Character Device Interface**
-   - Created device file at `int_stack`
-   - Implemented file operations:
-     - `open()` and `release()` for initialization
-     - `read()` for pop operation
-     - `write()` for push operation
-     - `ioctl()` for size configuration
+![alt text](test_01.jpg)
 
-3. **Synchronization**
-   - I used mutex to protect stack operations
-   - Ensures thread-safe access to shared data
-   - Prevents race conditions in push/pop operations
+Tests:
 
-4. **Error Handling**
-   - Returns `0 (NULL)` for empty stack on pop
-   - Returns `-ERANGE` for full stack on push
-   - Proper error codes for ioctl operations
-   - Memory allocation error handling
-
-## **Userspace Utility**
-
-1. **Command Line Interface**
-   - `set-size` - Configure stack size
-   - `push` - Push value onto stack
-   - `pop` - Pop value from stack
-   - `unwind` - Pop all values from stack
-
-2. **Error Handling**
-   - User-friendly error messages
-   - Proper error code propagation
-   - Input validation
-
-3. **Usage Examples and testing**
 ```bash
 $ ./kernel_stack set-size 2
 $ ./kernel_stack push 1
@@ -467,6 +511,12 @@ The implementation successfully achieved all requirements:
 2. Implemented proper error handling and edge cases
 3. Developed a user-friendly CLI utility
 4. Ensured proper synchronization for concurrent access
+
+The implementation meets all requirements for Lab 5:
+1. The integer stack kernel module is protected by a USB electronic key.
+2. The chardev is dynamically created and removed based on the key's presence.
+3. The stack is preserved on key removal.
+4. The userspace utility provides clear feedback if the key is not present.
 
 During this lab, I learned:
 - Linux kernel module development
