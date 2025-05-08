@@ -1,1 +1,1 @@
-/home/dariashib/Advanced_Linux/int_stack.o
+/home/dariashib/lab5/int_stack.o

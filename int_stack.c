@@ -6,12 +6,18 @@
 #include <linux/ioctl.h>
 #include <linux/device.h>
 #include <linux/cdev.h>
+#include <linux/usb.h>  // Include USB support
 
 #define DEVICE_NAME "int_stack"
 #define IOCTL_SET_SIZE _IOW('s', 1, int)
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Daria Shibkova");
+MODULE_DESCRIPTION("Integer stack kernel module with USB key support");
+
+// USB device ID for the electronic key
+#define USB_KEY_VENDOR_ID 0x0e0f
+#define USB_KEY_PRODUCT_ID 0x0003
 
 // Stack data structure with mutex protection
 struct stack {
@@ -25,6 +31,78 @@ static struct stack *stack;
 static int major_number;
 static struct class *stack_class;
 static struct device *stack_device;
+
+// USB device table
+static const struct usb_device_id usb_key_table[] = {
+    { USB_DEVICE(USB_KEY_VENDOR_ID, USB_KEY_PRODUCT_ID) },
+    {}
+};
+MODULE_DEVICE_TABLE(usb, usb_key_table);
+
+// Function prototypes
+static int stack_open(struct inode *inode, struct file *file);
+static int stack_release(struct inode *inode, struct file *file);
+static ssize_t stack_read(struct file *file, char __user *buf, size_t count, loff_t *ppos);
+static ssize_t stack_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
+static long stack_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+
+// File operations structure
+static const struct file_operations stack_fops = {
+    .owner = THIS_MODULE,
+    .open = stack_open,
+    .release = stack_release,
+    .read = stack_read,
+    .write = stack_write,
+    .unlocked_ioctl = stack_ioctl,
+};
+
+// USB probe function
+static int usb_key_probe(struct usb_interface *interface, const struct usb_device_id *id) {
+    printk(KERN_INFO "USB key inserted\n");
+    
+    // Register character device
+    major_number = register_chrdev(0, DEVICE_NAME, &stack_fops);
+    if (major_number < 0) {
+        printk(KERN_ERR "Failed to register character device\n");
+        return major_number;
+    }
+    
+    stack_class = class_create(DEVICE_NAME);
+    if (IS_ERR(stack_class)) {
+        unregister_chrdev(major_number, DEVICE_NAME);
+        return PTR_ERR(stack_class);
+    }
+    
+    stack_device = device_create(stack_class, NULL, MKDEV(major_number, 0), NULL, DEVICE_NAME);
+    if (IS_ERR(stack_device)) {
+        class_destroy(stack_class);
+        unregister_chrdev(major_number, DEVICE_NAME);
+        return PTR_ERR(stack_device);
+    }
+    
+    printk(KERN_INFO "Character device created\n");
+    return 0;
+}
+
+// USB disconnect function
+static void usb_key_disconnect(struct usb_interface *interface) {
+    printk(KERN_INFO "USB key removed\n");
+    
+    // Remove character device
+    device_destroy(stack_class, MKDEV(major_number, 0));
+    class_destroy(stack_class);
+    unregister_chrdev(major_number, DEVICE_NAME);
+    
+    printk(KERN_INFO "Character device removed\n");
+}
+
+// USB driver structure
+static struct usb_driver usb_key_driver = {
+    .name = "usb_key_driver",
+    .id_table = usb_key_table,
+    .probe = usb_key_probe,
+    .disconnect = usb_key_disconnect,
+};
 
 // Initialize device on open
 static int stack_open(struct inode *inode, struct file *file) {
@@ -122,18 +200,10 @@ static long stack_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
     return 0;
 }
 
-// File operations structure
-static const struct file_operations stack_fops = {
-    .owner = THIS_MODULE,
-    .open = stack_open,
-    .release = stack_release,
-    .read = stack_read,
-    .write = stack_write,
-    .unlocked_ioctl = stack_ioctl,
-};
-
 // Module initialization
 static int __init stack_init(void) {
+    int result;
+    
     stack = kmalloc(sizeof(struct stack), GFP_KERNEL);
     if (!stack)
         return -ENOMEM;
@@ -143,36 +213,21 @@ static int __init stack_init(void) {
     stack->size = 0;
     stack->top = 0;
     
-    major_number = register_chrdev(0, DEVICE_NAME, &stack_fops);
-    if (major_number < 0) {
+    // Register USB driver
+    result = usb_register(&usb_key_driver);
+    if (result) {
         kfree(stack);
-        return major_number;
+        printk(KERN_ERR "Failed to register USB driver\n");
+        return result;
     }
     
-    stack_class = class_create(DEVICE_NAME);
-    if (IS_ERR(stack_class)) {
-        unregister_chrdev(major_number, DEVICE_NAME);
-        kfree(stack);
-        return PTR_ERR(stack_class);
-    }
-    
-    stack_device = device_create(stack_class, NULL, MKDEV(major_number, 0), NULL, DEVICE_NAME);
-    if (IS_ERR(stack_device)) {
-        class_destroy(stack_class);
-        unregister_chrdev(major_number, DEVICE_NAME);
-        kfree(stack);
-        return PTR_ERR(stack_device);
-    }
-    
-    printk(KERN_INFO "Stack module loaded\n");
+    printk(KERN_INFO "Stack module with USB key support loaded\n");
     return 0;
 }
 
 // Module cleanup
 static void __exit stack_exit(void) {
-    device_destroy(stack_class, MKDEV(major_number, 0));
-    class_destroy(stack_class);
-    unregister_chrdev(major_number, DEVICE_NAME);
+    usb_deregister(&usb_key_driver);
     
     if (stack) {
         if (stack->data)
@@ -180,7 +235,7 @@ static void __exit stack_exit(void) {
         kfree(stack);
     }
     
-    printk(KERN_INFO "Stack module unloaded\n");
+    printk(KERN_INFO "Stack module with USB key support unloaded\n");
 }
 
 module_init(stack_init);

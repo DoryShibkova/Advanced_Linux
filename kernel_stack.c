@@ -24,6 +24,12 @@ int main(int argc, char *argv[]) {
     int value;
     int ret;
 
+    // Check if the device file exists
+    if (access(DEVICE_PATH, F_OK) == -1) {
+        fprintf(stderr, "error: USB key not inserted\n");
+        return 1;
+    }
+
     if (argc < 2) {
         print_usage();
         return 1;
